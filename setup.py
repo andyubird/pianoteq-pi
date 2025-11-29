@@ -8,7 +8,7 @@ import stat
 import subprocess
 import sys
 
-PIANOTEQ_VERSION = 8
+PIANOTEQ_VERSION = 9
 USERNAME = os.getlogin()
 HOME = f"/home/{USERNAME}"
 DEFAULT_INSTALL_LOCATION = HOME
@@ -155,32 +155,47 @@ class Pianoteq:
                 if e.returncode == 1:
                     return False
 
-        if which_cmd('7za') and which_cmd('cpufreq-set'):
+        # Only cpufreq-set is actually required now
+        if which_cmd('cpufreq-set'):
             return
         notify('Installing dependencies ...')
         run('apt', 'update')
-        run('apt', 'install', 'p7zip-full', 'cpufrequtils', '-y')
+        run('apt', 'install', 'cpufrequtils', '-y')
 
     @staticmethod
     def _find_installer_package():
         for fn in os.listdir(os.curdir):
-            if re.search(r'^pianoteq\w*_linux_v?\d*\.(7z|zip)$', fn) and os.path.isfile(fn):
+            # Match e.g. "pianoteq_linux_v903.tar.xz"
+            if re.search(r'^pianoteq.*linux.*\.tar\.xz$', fn) and os.path.isfile(fn):
                 return fn
-        else:
-            raise LookupError('Unable to find installer package.')
+        raise LookupError('Unable to find installer package.')
 
     def extract_package(self):
         package_path = self._find_installer_package()
         notify(f'Extracting package {package_path} ...')
-        content_list = run('7za', 'l', '-slt', package_path, interact=False)
-        root_dir = re.search(r'^-{5,}\n^Path = (.+)$', content_list, re.M).group(1).split('/')[0]
-        m = re.search(r'^Pianoteq \d+( \w+)?$', root_dir)
+
+        # List contents to detect top-level directory (e.g. "Pianoteq 9")
+        content_list = run('tar', '-tf', package_path, interact=False)
+        first_entry = next(line for line in content_list.splitlines() if line.strip())
+        root_dir = first_entry.split('/')[0]
+
+        m = re.match(r'^Pianoteq \d+( \w+)?$', root_dir)
+        if not m:
+            raise RuntimeError(f'Could not detect Pianoteq root dir from tar: {root_dir}')
         self.edition_suffix = m.group(1) or ''
-        exclusion = self.all_arch_bits[:]
-        exclusion.remove(rp.arch_bit)
-        exclusion = ['-xr!' + e for e in exclusion]
-        run('7za', 'x', package_path, '-o' + self.parent_dir, '-aoa', *exclusion)
+
+        # Extract everything into the parent directory
+        run('tar', '-xvf', package_path, '-C', self.parent_dir)
+
         self.pianoteq_dir = os.path.join(self.parent_dir, root_dir)
+
+        # Optional: remove non-matching architectures
+        for arch in self.all_arch_bits:
+            if arch != rp.arch_bit:
+                unwanted = os.path.join(self.pianoteq_dir, arch)
+                if os.path.isdir(unwanted):
+                    run('rm', '-rf', unwanted)
+
         return self.pianoteq_dir
 
     @property
@@ -248,6 +263,8 @@ Icon={self.pianoteq_dir}/icon.png
 Comment=Fourth Generation Piano Instrument
 Terminal=false
 """
+        # You can either download an icon, or let Pianoteq install one itself.
+        # Here we keep the original behaviour (download from GitHub).
         run(
             'wget',
             'https://raw.githubusercontent.com/youfou/pianoteq-pi/main/icon.png',
@@ -264,9 +281,9 @@ Terminal=false
         try:
             self.extract_package()
         except LookupError:
-            notify('Pianoteq 7z/zip package not found')
+            notify('Pianoteq tar.xz package not found')
             sys.exit(
-                'Please download Pianoteq from Modartt website and put the 7z/zip package under the same folder.\n'
+                'Please download Pianoteq from Modartt website and put the tar.xz package under the same folder.\n'
                 'Download: https://www.modartt.com/user_area#downloads'
             )
         self.create_start_sh()
@@ -341,7 +358,6 @@ if __name__ == '__main__':
             ('Uninstall', pt.uninstall),
             ('Overclock CPU or cancel overclocking', ask_to_overclock_cpu)
         ])
-
     else:
         pt.install()
         ask_to_overclock_cpu()
